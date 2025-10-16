@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
@@ -15,9 +16,16 @@ import (
 type ConnectionType string
 
 const (
-	ConnPlain     ConnectionType = "plain"     // Plain SMTP (no encryption)
-	ConnSTARTTLS  ConnectionType = "starttls"  // STARTTLS (upgrade to TLS)
-	ConnTLS       ConnectionType = "tls"       // Direct TLS/SSL (SMTPS)
+	ConnPlain    ConnectionType = "plain"    // Plain SMTP (no encryption)
+	ConnSTARTTLS ConnectionType = "starttls" // STARTTLS (upgrade to TLS)
+	ConnTLS      ConnectionType = "tls"      // Direct TLS/SSL (SMTPS)
+)
+
+type AuthType string
+
+const (
+	AuthPlain AuthType = "plain" // AUTH PLAIN
+	AuthLogin AuthType = "login" // AUTH LOGIN
 )
 
 type Config struct {
@@ -30,9 +38,48 @@ type Config struct {
 	Username       string
 	Password       string
 	ConnectionType ConnectionType
+	AuthType       AuthType
 	Subject        string
 	Body           string
 	LogFile        string
+}
+
+// loginAuth implements AUTH LOGIN authentication
+type loginAuth struct {
+	username, password string
+}
+
+func LoginAuth(username, password string) smtp.Auth {
+	return &loginAuth{username, password}
+}
+
+func (a *loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	return "LOGIN", []byte{}, nil
+}
+
+func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if more {
+		switch string(fromServer) {
+		case "Username:", "User Name\x00":
+			return []byte(a.username), nil
+		case "Password:", "Password\x00":
+			return []byte(a.password), nil
+		default:
+			// Handle base64 encoded prompts
+			decoded, err := base64.StdEncoding.DecodeString(string(fromServer))
+			if err == nil {
+				decodedStr := strings.ToLower(string(decoded))
+				if strings.Contains(decodedStr, "user") {
+					return []byte(a.username), nil
+				}
+				if strings.Contains(decodedStr, "pass") {
+					return []byte(a.password), nil
+				}
+			}
+			return nil, fmt.Errorf("unexpected server challenge: %s", string(fromServer))
+		}
+	}
+	return nil, nil
 }
 
 type Logger struct {
@@ -69,6 +116,13 @@ func (l *Logger) Success(format string, v ...interface{}) {
 	l.logger.Printf("[SUCCESS] "+format, v...)
 }
 
+func getAuth(config *Config) smtp.Auth {
+	if config.AuthType == AuthLogin {
+		return LoginAuth(config.Username, config.Password)
+	}
+	return smtp.PlainAuth("", config.Username, config.Password, config.SMTPServer)
+}
+
 func sendEmail(config *Config, logger *Logger) error {
 	logger.Info("Starting email send process")
 	logger.Info("SMTP Server: %s:%s", config.SMTPServer, config.SMTPPort)
@@ -84,7 +138,7 @@ func sendEmail(config *Config, logger *Logger) error {
 
 	// Check if authentication is configured
 	if config.Username != "" && config.Password != "" {
-		logger.Info("Authentication: Enabled (Username: %s)", config.Username)
+		logger.Info("Authentication: Enabled (Username: %s, Type: %s)", config.Username, config.AuthType)
 	} else {
 		logger.Info("Authentication: Disabled (no credentials provided)")
 	}
@@ -133,8 +187,8 @@ func sendEmailPlain(serverAddr string, config *Config, msg []byte, logger *Logge
 
 	// Authenticate only if credentials are provided
 	if config.Username != "" && config.Password != "" {
-		logger.Info("Attempting authentication with username: %s", config.Username)
-		auth := smtp.PlainAuth("", config.Username, config.Password, config.SMTPServer)
+		logger.Info("Attempting authentication with username: %s (method: %s)", config.Username, config.AuthType)
+		auth := getAuth(config)
 		if err = client.Auth(auth); err != nil {
 			return fmt.Errorf("authentication failed: %w", err)
 		}
@@ -210,8 +264,8 @@ func sendEmailSTARTTLS(serverAddr string, config *Config, msg []byte, logger *Lo
 
 	// Authenticate only if credentials are provided
 	if config.Username != "" && config.Password != "" {
-		logger.Info("Attempting authentication with username: %s", config.Username)
-		auth := smtp.PlainAuth("", config.Username, config.Password, config.SMTPServer)
+		logger.Info("Attempting authentication with username: %s (method: %s)", config.Username, config.AuthType)
+		auth := getAuth(config)
 		if err = client.Auth(auth); err != nil {
 			return fmt.Errorf("authentication failed: %w", err)
 		}
@@ -290,8 +344,8 @@ func sendEmailTLS(serverAddr string, config *Config, msg []byte, logger *Logger)
 
 	// Authenticate only if credentials are provided
 	if config.Username != "" && config.Password != "" {
-		logger.Info("Attempting authentication with username: %s", config.Username)
-		auth := smtp.PlainAuth("", config.Username, config.Password, config.SMTPServer)
+		logger.Info("Attempting authentication with username: %s (method: %s)", config.Username, config.AuthType)
+		auth := getAuth(config)
 		if err = client.Auth(auth); err != nil {
 			return fmt.Errorf("authentication failed: %w", err)
 		}
@@ -370,6 +424,7 @@ func main() {
 	username := flag.String("user", "", "SMTP username for authentication (optional)")
 	password := flag.String("password", "", "SMTP password for authentication (optional)")
 	connType := flag.String("conn", "plain", "Connection type: plain, starttls, or tls (default: plain)")
+	authType := flag.String("auth", "plain", "Authentication type: plain or login (default: plain)")
 	subject := flag.String("subject", "Test Email", "Email subject")
 	body := flag.String("body", "This is a test email from BHPetrol Email Testing Tool.", "Email body")
 	logFile := flag.String("log", "", "Log file path (optional, logs to stdout if not specified)")
@@ -393,6 +448,9 @@ func main() {
 		fmt.Println("            plain    - Plain SMTP without encryption (port 25)")
 		fmt.Println("            starttls - Start with plain, upgrade to TLS (port 587)")
 		fmt.Println("            tls      - Direct TLS connection/SMTPS (port 465)")
+		fmt.Println("  -auth     Authentication type: plain or login (default: plain)")
+		fmt.Println("            plain    - AUTH PLAIN")
+		fmt.Println("            login    - AUTH LOGIN")
 		fmt.Println("  -subject  Email subject")
 		fmt.Println("  -body     Email body")
 		fmt.Println("  -log      Log file path")
@@ -413,6 +471,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Validate authentication type
+	var authenticationType AuthType
+	switch strings.ToLower(*authType) {
+	case "plain":
+		authenticationType = AuthPlain
+	case "login":
+		authenticationType = AuthLogin
+	default:
+		fmt.Printf("Error: Invalid authentication type '%s'. Must be: plain or login\n", *authType)
+		os.Exit(1)
+	}
+
 	// Parse recipient addresses
 	recipients := parseEmailList(*toAddrs)
 	ccRecipients := parseEmailList(*ccAddrs)
@@ -429,6 +499,7 @@ func main() {
 		Username:       *username,
 		Password:       *password,
 		ConnectionType: connectionType,
+		AuthType:       authenticationType,
 		Subject:        *subject,
 		Body:           *body,
 		LogFile:        *logFile,
