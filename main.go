@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const Version = "1.0.0"
+
 type ConnectionType string
 
 const (
@@ -415,6 +417,7 @@ func parseEmailList(emailStr string) []string {
 
 func main() {
 	// Define command line flags
+	version := flag.Bool("version", false, "Show version information")
 	smtpServer := flag.String("server", "", "SMTP server address (required)")
 	smtpPort := flag.String("port", "25", "SMTP server port (default: 25)")
 	fromAddr := flag.String("from", "", "Sender email address (required)")
@@ -430,6 +433,12 @@ func main() {
 	logFile := flag.String("log", "", "Log file path (optional, logs to stdout if not specified)")
 
 	flag.Parse()
+
+	// Handle version flag
+	if *version {
+		fmt.Printf("BHPetrol Email Testing Tool (mailit) version %s\n", Version)
+		os.Exit(0)
+	}
 
 	// Validate required flags
 	if *smtpServer == "" || *fromAddr == "" || *toAddrs == "" {
@@ -512,7 +521,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("=== BHPetrol Email Testing Tool ===")
+	logger.Info("=== BHPetrol Email Testing Tool v%s ===", Version)
 	logger.Info("Starting at: %s", time.Now().Format(time.RFC3339))
 
 	// Send email
